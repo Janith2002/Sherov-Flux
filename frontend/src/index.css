@@ -1,0 +1,22 @@
+@import "tailwindcss";
+
+@theme {
+  --color-sherov-dark: #0f0f1a;
+  --color-sherov-glass: rgba(255, 255, 255, 0.1);
+  --color-sherov-neon: #00f3ff;
+  --color-sherov-purple: #bf00ff;
+  --backdrop-blur-xs: 2px;
+}
+
+@layer base {
+  body {
+    @apply bg-sherov-dark text-white font-sans antialiased overflow-x-hidden;
+    background-image: radial-gradient(circle at 50% 0%, #1a1a2e 0%, #0f0f1a 100%);
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-sherov-glass backdrop-blur-md border border-white/10 shadow-lg;
+  }
+}
