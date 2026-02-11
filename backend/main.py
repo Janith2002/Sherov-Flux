@@ -32,14 +32,11 @@ async def stream_video(url: str = Query(...), quality: str = Query(None), type: 
     import sys
     import os
     
-    # Assuming standard venv structure: python is in Scripts/python.exe, yt-dlp is in Scripts/yt-dlp.exe
-    yt_dlp_path = os.path.join(os.path.dirname(sys.executable), "yt-dlp.exe")
-    if not os.path.exists(yt_dlp_path):
-        # Fallback for non-Windows or different venv structure, though user is on Windows
-        yt_dlp_path = "yt-dlp"
-
+    # Use python -m yt_dlp to avoid path issues on Linux/Docker
+    # This works because yt-dlp is installed as a python package
+    
     # Build yt-dlp command to stream to stdout
-    cmd = [yt_dlp_path, url, "-o", "-", "--quiet", "--no-warnings"]
+    cmd = [sys.executable, "-m", "yt_dlp", url, "-o", "-", "--quiet", "--no-warnings"]
     
     if type == "audio":
         cmd.extend(["-f", "bestaudio/best", "-x", "--audio-format", "mp3"])
@@ -70,18 +67,13 @@ async def stream_video(url: str = Query(...), quality: str = Query(None), type: 
         "Content-Disposition": f'attachment; filename="{filename}"'
     }
     
+    
     return StreamingResponse(iterfile(), media_type=media_type, headers=headers)
 
-@app.post("/api/download")
-async def extract_video_info(request_body: VideoRequest, request: FastAPI.Request = None):
-    # Note: We need the raw Request object to get the base URL
-    # But since we use Pydantic model for body, we can access Request via dependency injection if we import Request from fastapi
-    from fastapi import Request
-    
-    # We need to change the function signature to accept Request
-    pass
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "service": "Sherov Backend"}
 
-# Redefining the function with correct signature and logic
 @app.post("/api/download")
 async def extract_video_info(video_request: VideoRequest, request: Request):
     ydl_opts = {

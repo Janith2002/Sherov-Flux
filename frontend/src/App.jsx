@@ -20,7 +20,8 @@ function App() {
       setVideoData(response.data)
     } catch (err) {
       console.error(err)
-      setError('Failed to fetch video. Please check the URL.')
+      const msg = err.response?.data?.detail || err.message || 'Failed to fetch';
+      setError(msg)
     } finally {
       setLoading(false)
     }
@@ -84,7 +85,15 @@ function App() {
           </div>
         </div>
 
-        {error && <p className="text-red-400 mt-4 text-center">{error}</p>}
+        {error && (
+          <div className="mt-4 text-center">
+            <p className="text-red-400 font-bold">{error}</p>
+            <p className="text-gray-500 text-xs mt-2">
+              Debug: API={import.meta.env.VITE_API_URL || 'localhost'} <br />
+              Details: {error.message || JSON.stringify(error)}
+            </p>
+          </div>
+        )}
 
         {videoData && (
           <div className="mt-8 animate-fade-in w-full">
