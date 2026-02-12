@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import yt_dlp
+import requests
 import uvicorn
 import subprocess
 import shlex
@@ -19,12 +20,11 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_event():
     print("--------------------------------------------------")
-    print("🚀 STARTUP: SHEROV BACKEND V3 (DoH Patch)")
+    print("🚀 STARTUP: SHEROV BACKEND V5 (Hybrid Cobalt + yt-dlp)")
     print(f"📦 yt-dlp version: {yt_dlp.version.__version__}")
-    print("✅ /api/debug endpoint should be available")
+    print("✅ Cobalt API primary, yt-dlp fallback")
     print("--------------------------------------------------")
     import patch_dns
-    # Ensure patch is applied if not already (it's idempotent-ish)
     patch_dns.patch()
 
 @app.get("/api/debug")
@@ -171,99 +171,164 @@ async def cobalt_audio(url: str = Query(...)):
 
 @app.post("/api/download")
 async def extract_video_info(video_request: VideoRequest, request: Request):
-    """Extract video info using Cobalt API to bypass bot detection."""
+    """Extract video info using hybrid Cobalt + yt-dlp approach."""
     
+    # Clean URL (remove tracking parameters)
+    clean_url = video_request.url
+    if '?si=' in clean_url or '&si=' in clean_url:
+        clean_url = clean_url.split('?si=')[0].split('&si=')[0]
+    
+    print(f"Processing URL: {video_request.url}")
+    print(f"Cleaned URL: {clean_url}")
+    
+    # Try Cobalt first
     try:
-        print(f"Processing URL via Cobalt API: {video_request.url}")
-        
-        # Call Cobalt API
-        cobalt_url = "https://api.cobalt.tools/"
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
+        print("Attempting Cobalt API extraction...")
+        return await extract_with_cobalt(clean_url, request)
+    except HTTPException as e:
+        if e.status_code == 400:
+            print(f"Cobalt failed with 400, falling back to yt-dlp...")
+            # Cobalt failed, try yt-dlp
+            try:
+                return await extract_with_ytdlp(video_request.url, request)
+            except Exception as ytdlp_error:
+                print(f"yt-dlp also failed: {str(ytdlp_error)}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Both Cobalt and yt-dlp failed. Cobalt: {e.detail}, yt-dlp: {str(ytdlp_error)}"
+                )
+        raise
+
+async def extract_with_cobalt(url: str, request: Request):
+    """Extract video info using Cobalt API."""
+    import requests
+    
+    cobalt_url = "https://api.cobalt.tools/"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "url": url,
+        "videoQuality": "max",
+        "audioFormat": "mp3",
+        "filenameStyle": "basic"
+    }
+    
+    response = requests.post(cobalt_url, json=payload, headers=headers, timeout=15)
+    
+    if response.status_code != 200:
+        try:
+            error_data = response.json()
+            error_detail = error_data.get("error", {}).get("code", response.text)
+        except:
+            error_detail = response.text
+        raise HTTPException(status_code=400, detail=f"Cobalt: {error_detail}")
+    
+    cobalt_data = response.json()
+    print(f"Cobalt response: {cobalt_data}")
+    
+    status = cobalt_data.get("status")
+    
+    if status == "error":
+        error_msg = cobalt_data.get("error", {}).get("code", "Unknown error")
+        raise HTTPException(status_code=400, detail=f"Cobalt: {error_msg}")
+    
+    if status not in ["tunnel", "redirect"]:
+        raise HTTPException(status_code=400, detail=f"Cobalt: Unexpected status {status}")
+    
+    download_url = cobalt_data.get("url")
+    if not download_url:
+        raise HTTPException(status_code=400, detail="Cobalt: No download URL")
+    
+    filename = cobalt_data.get("filename", "video.mp4")
+    
+    # Determine platform
+    platform = "Unknown"
+    if "youtube.com" in url or "youtu.be" in url:
+        platform = "YouTube"
+    elif "instagram.com" in url:
+        platform = "Instagram"
+    elif "tiktok.com" in url:
+        platform = "TikTok"
+    elif "facebook.com" in url or "fb.watch" in url:
+        platform = "Facebook"
+    elif "twitter.com" in url or "x.com" in url:
+        platform = "Twitter"
+    
+    base_url = str(request.base_url).rstrip('/')
+    
+    formats = [
+        {
+            "label": "Best Quality (Cobalt)",
+            "quality": "hd",
+            "file_size": None,
+            "url": download_url,
+            "ext": "mp4"
+        },
+        {
+            "label": "Audio Only",
+            "quality": "audio",
+            "file_size": None,
+            "url": f"{base_url}/api/cobalt-audio?url={url}",
+            "ext": "mp3"
         }
-        payload = {
-            "url": video_request.url,
-            "videoQuality": "max",
-            "audioFormat": "mp3",
-            "filenameStyle": "basic"
-        }
+    ]
+    
+    return {
+        "title": filename.replace(".mp4", "").replace(".webm", ""),
+        "thumbnail": None,
+        "platform": platform,
+        "duration": None,
+        "formats": formats
+    }
+
+async def extract_with_ytdlp(url: str, request: Request):
+    """Extract video info using yt-dlp (fallback)."""
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'format': 'best',
+        'nocheckcertificate': True,
+        'ignoreerrors': True,
+        'no_color': True,
+        'socket_timeout': 30,
+        'force_ipv4': True,
+    }
+    
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
         
-        response = requests.post(cobalt_url, json=payload, headers=headers, timeout=15)
+        if not info:
+            raise ValueError("Could not extract video info")
         
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail=f"Cobalt API error: {response.status_code}")
-        
-        cobalt_data = response.json()
-        print(f"Cobalt response: {cobalt_data}")
-        
-        # Check response status
-        status = cobalt_data.get("status")
-        
-        if status == "error":
-            error_msg = cobalt_data.get("error", {}).get("code", "Unknown error")
-            raise HTTPException(status_code=400, detail=f"Cobalt error: {error_msg}")
-        
-        if status not in ["tunnel", "redirect"]:
-            raise HTTPException(status_code=400, detail=f"Unexpected Cobalt status: {status}")
-        
-        # Get the download URL
-        download_url = cobalt_data.get("url")
-        if not download_url:
-            raise HTTPException(status_code=400, detail="No download URL from Cobalt")
-        
-        # Extract basic info (Cobalt doesn't provide all metadata, so we'll use defaults)
-        filename = cobalt_data.get("filename", "video.mp4")
-        
-        # Determine platform from URL
-        platform = "Unknown"
-        if "youtube.com" in video_request.url or "youtu.be" in video_request.url:
-            platform = "YouTube"
-        elif "instagram.com" in video_request.url:
-            platform = "Instagram"
-        elif "tiktok.com" in video_request.url:
-            platform = "TikTok"
-        elif "facebook.com" in video_request.url or "fb.watch" in video_request.url:
-            platform = "Facebook"
-        elif "twitter.com" in video_request.url or "x.com" in video_request.url:
-            platform = "Twitter"
-        
-        # Create response with single format (Cobalt provides best quality)
         base_url = str(request.base_url).rstrip('/')
         
+        # Simple format extraction
         formats = [
             {
-                "label": "Best Quality",
+                "label": "Best Quality (yt-dlp)",
                 "quality": "hd",
-                "file_size": None,  # Cobalt doesn't provide size info
-                "url": download_url,
+                "file_size": None,
+                "url": f"{base_url}/api/stream?url={url}&type=video",
                 "ext": "mp4"
             },
             {
                 "label": "Audio Only",
                 "quality": "audio",
                 "file_size": None,
-                "url": f"{base_url}/api/cobalt-audio?url={video_request.url}",
+                "url": f"{base_url}/api/stream?url={url}&type=audio",
                 "ext": "mp3"
             }
         ]
         
-        video_data = {
-            "title": filename.replace(".mp4", "").replace(".webm", ""),
-            "thumbnail": None,  # Cobalt doesn't provide thumbnails
-            "platform": platform,
-            "duration": None,  # Cobalt doesn't provide duration
+        return {
+            "title": info.get('title', 'Unknown'),
+            "thumbnail": info.get('thumbnail'),
+            "platform": info.get('extractor_key', 'Unknown'),
+            "duration": info.get('duration_string'),
             "formats": formats
         }
-        
-        return video_data
-        
-    except requests.exceptions.RequestException as e:
-        print(f"Network error calling Cobalt API: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Network error: {str(e)}")
-    except Exception as e:
-        print(f"Error processing URL: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Extraction failed: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
