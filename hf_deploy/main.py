@@ -20,6 +20,7 @@ app = FastAPI()
 async def startup_event():
     print("--------------------------------------------------")
     print("🚀 STARTUP: SHEROV BACKEND V3 (DoH Patch)")
+    print(f"📦 yt-dlp version: {yt_dlp.version.__version__}")
     print("✅ /api/debug endpoint should be available")
     print("--------------------------------------------------")
     import patch_dns

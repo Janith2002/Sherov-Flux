@@ -1,6 +1,9 @@
 fastapi
 uvicorn
-yt-dlp>=2024.08.06
+fastapi
+uvicorn
+yt-dlp @ git+https://github.com/yt-dlp/yt-dlp.git@master
+requests
 requests
 pydantic
 certifi
