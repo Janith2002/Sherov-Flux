@@ -20,9 +20,10 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_event():
     print("--------------------------------------------------")
-    print("🚀 STARTUP: SHEROV BACKEND V5 (Hybrid Cobalt + yt-dlp)")
+    print("🚀 STARTUP: SHEROV BACKEND V6 (Invidious + Cobalt + yt-dlp)")
     print(f"📦 yt-dlp version: {yt_dlp.version.__version__}")
-    print("✅ Cobalt API primary, yt-dlp fallback")
+    print("✅ YouTube: Invidious (cookie-free!)")
+    print("✅ Others: Cobalt → yt-dlp fallback")
     print("--------------------------------------------------")
     import patch_dns
     patch_dns.patch()
@@ -171,7 +172,7 @@ async def cobalt_audio(url: str = Query(...)):
 
 @app.post("/api/download")
 async def extract_video_info(video_request: VideoRequest, request: Request):
-    """Extract video info using hybrid Cobalt + yt-dlp approach."""
+    """Extract video info using platform-specific extractors."""
     
     # Clean URL (remove tracking parameters)
     clean_url = video_request.url
@@ -181,23 +182,127 @@ async def extract_video_info(video_request: VideoRequest, request: Request):
     print(f"Processing URL: {video_request.url}")
     print(f"Cleaned URL: {clean_url}")
     
-    # Try Cobalt first
-    try:
-        print("Attempting Cobalt API extraction...")
-        return await extract_with_cobalt(clean_url, request)
-    except HTTPException as e:
-        if e.status_code == 400:
-            print(f"Cobalt failed with 400, falling back to yt-dlp...")
-            # Cobalt failed, try yt-dlp
+    # Check if it's YouTube
+    is_youtube = "youtube.com" in clean_url or "youtu.be" in clean_url
+    
+    if is_youtube:
+        # Try Invidious for YouTube (cookie-free!)
+        try:
+            print("Attempting Invidious API extraction (YouTube)...")
+            return await extract_with_invidious(clean_url, request)
+        except Exception as inv_error:
+            print(f"Invidious failed: {str(inv_error)}, falling back to yt-dlp...")
+            # Fallback to yt-dlp for YouTube
             try:
                 return await extract_with_ytdlp(video_request.url, request)
             except Exception as ytdlp_error:
                 print(f"yt-dlp also failed: {str(ytdlp_error)}")
                 raise HTTPException(
-                    status_code=400, 
-                    detail=f"Both Cobalt and yt-dlp failed. Cobalt: {e.detail}, yt-dlp: {str(ytdlp_error)}"
+                    status_code=400,
+                    detail=f"YouTube extraction failed. Invidious: {str(inv_error)}, yt-dlp: {str(ytdlp_error)}"
                 )
-        raise
+    else:
+        # Try Cobalt for other platforms
+        try:
+            print("Attempting Cobalt API extraction...")
+            return await extract_with_cobalt(clean_url, request)
+        except HTTPException as e:
+            if e.status_code == 400:
+                print(f"Cobalt failed with 400, falling back to yt-dlp...")
+                try:
+                    return await extract_with_ytdlp(video_request.url, request)
+                except Exception as ytdlp_error:
+                    print(f"yt-dlp also failed: {str(ytdlp_error)}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Both Cobalt and yt-dlp failed. Cobalt: {e.detail}, yt-dlp: {str(ytdlp_error)}"
+                    )
+            raise
+
+async def extract_with_invidious(url: str, request: Request):
+    """Extract video info using Invidious API (YouTube only, cookie-free)."""
+    import re
+    
+    # Extract video ID from URL
+    video_id = None
+    if "youtu.be/" in url:
+        video_id = url.split("youtu.be/")[1].split("?")[0]
+    elif "youtube.com/watch?v=" in url:
+        video_id = url.split("v=")[1].split("&")[0]
+    
+    if not video_id:
+        raise ValueError("Could not extract YouTube video ID")
+    
+    print(f"Extracted video ID: {video_id}")
+    
+    # Try multiple Invidious instances for reliability
+    instances = [
+        "https://invidious.io.lol",
+        "https://inv.nadeko.net",
+        "https://invidious.nerdvpn.de"
+    ]
+    
+    last_error = None
+    for instance in instances:
+        try:
+            invidious_url = f"{instance}/api/v1/videos/{video_id}"
+            print(f"Trying Invidious instance: {instance}")
+            
+            response = requests.get(invidious_url, timeout=10)
+            
+            if response.status_code != 200:
+                last_error = f"{instance} returned {response.status_code}"
+                continue
+            
+            data = response.json()
+            
+            # Get adaptive formats (best quality)
+            formats_list = []
+            base_url = str(request.base_url).rstrip('/')
+            
+            # Add video formats
+            if 'adaptiveFormats' in data:
+                for fmt in data['adaptiveFormats']:
+                    if fmt.get('type', '').startswith('video'):
+                        quality_label = fmt.get('qualityLabel', 'Unknown')
+                        formats_list.append({
+                            "label": f"{quality_label} (Invidious)",
+                            "quality": "hd" if "1080" in quality_label or "720" in quality_label else "sd",
+                            "file_size": fmt.get('size'),
+                            "url": fmt.get('url'),
+                            "ext": "mp4"
+                        })
+            
+            # Add audio format
+            for fmt in data.get('adaptiveFormats', []):
+                if fmt.get('type', '').startswith('audio'):
+                    formats_list.append({
+                        "label": "Audio Only",
+                        "quality": "audio",
+                        "file_size": fmt.get('size'),
+                        "url": fmt.get('url'),
+                        "ext": "mp3"
+                    })
+                    break
+            
+            if not formats_list:
+                last_error = f"{instance} returned no formats"
+                continue
+            
+            return {
+                "title": data.get('title', 'Unknown'),
+                "thumbnail": data.get('videoThumbnails', [{}])[0].get('url') if data.get('videoThumbnails') else None,
+                "platform": "YouTube",
+                "duration": str(data.get('lengthSeconds', 0)) + "s",
+                "formats": formats_list[:5]  # Limit to top 5 formats
+            }
+            
+        except Exception as e:
+            last_error = f"{instance}: {str(e)}"
+            continue
+    
+    # All instances failed
+    raise HTTPException(status_code=400, detail=f"All Invidious instances failed. Last error: {last_error}")
 
 async def extract_with_cobalt(url: str, request: Request):
     """Extract video info using Cobalt API."""
