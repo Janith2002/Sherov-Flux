@@ -285,6 +285,8 @@ async def extract_with_cobalt(url: str, request: Request):
 
 async def extract_with_ytdlp(url: str, request: Request):
     """Extract video info using yt-dlp (fallback)."""
+    import os
+    
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -295,6 +297,14 @@ async def extract_with_ytdlp(url: str, request: Request):
         'socket_timeout': 30,
         'force_ipv4': True,
     }
+    
+    # Add cookies if file exists
+    cookie_path = '/home/user/app/cookies.txt'
+    if os.path.exists(cookie_path):
+        ydl_opts['cookiefile'] = cookie_path
+        print(f"Using cookies from {cookie_path}")
+    else:
+        print("WARNING: No cookies.txt found. YouTube may require authentication.")
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
