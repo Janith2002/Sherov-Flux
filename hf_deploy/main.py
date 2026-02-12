@@ -133,14 +133,14 @@ async def health_check():
 @app.post("/api/download")
 async def extract_video_info(video_request: VideoRequest, request: Request):
     ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
+        'quiet': False, # Changed to False for debugging
+        'verbose': True, # Enable verbose logs
+        'no_warnings': False,
         'format': 'best',
         'nocheckcertificate': True,
         'ignoreerrors': True,
         'no_color': True,
-        'no_color': True,
-        'socket_timeout': 10,
+        'socket_timeout': 30,
         'force_ipv4': True,
     }
 
