@@ -16,6 +16,44 @@ except ImportError:
 
 app = FastAPI()
 
+@app.get("/api/debug")
+async def debug_network():
+    import socket
+    import requests
+    
+    results = {}
+    
+    # Check 1: System DNS
+    try:
+        results["system_dns_google"] = socket.gethostbyname("google.com")
+    except Exception as e:
+        results["system_dns_google"] = str(e)
+        
+    try:
+        results["system_dns_youtube"] = socket.gethostbyname("www.youtube.com")
+    except Exception as e:
+        results["system_dns_youtube"] = str(e)
+
+    # Check 2: DoH Patch Internal
+    try:
+        if hasattr(requests, 'packages'):
+            requests.packages.urllib3.disable_warnings()
+        
+        # Test request to Google DNS IP
+        r = requests.get("https://8.8.8.8", timeout=2, verify=False)
+        results["connect_8888_https"] = r.status_code
+    except Exception as e:
+        results["connect_8888_https"] = str(e)
+
+    # Check 3: External Connectivity
+    try:
+        r = requests.get("https://www.google.com", timeout=5)
+        results["connect_google_https"] = r.status_code
+    except Exception as e:
+        results["connect_google_https"] = str(e)
+
+    return results
+
 # Configure CORS
 # Configure CORS
 origins = [
