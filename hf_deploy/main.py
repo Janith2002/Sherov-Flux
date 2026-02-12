@@ -7,6 +7,13 @@ import uvicorn
 import subprocess
 import shlex
 
+import shlex
+try:
+    import patch_dns
+    patch_dns.patch()
+except ImportError:
+    print("WARNING: patch_dns module not found, skipping custom DNS patch.")
+
 app = FastAPI()
 
 # Configure CORS
