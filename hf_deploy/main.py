@@ -36,7 +36,7 @@ async def stream_video(url: str = Query(...), quality: str = Query(None), type: 
     # This works because yt-dlp is installed as a python package
     
     # Build yt-dlp command to stream to stdout
-    cmd = [sys.executable, "-m", "yt_dlp", url, "-o", "-", "--quiet", "--no-warnings"]
+    cmd = [sys.executable, "-m", "yt_dlp", url, "-o", "-", "--quiet", "--no-warnings", "--force-ipv4"]
     
     if type == "audio":
         cmd.extend(["-f", "bestaudio/best", "-x", "--audio-format", "mp3"])
@@ -83,7 +83,9 @@ async def extract_video_info(video_request: VideoRequest, request: Request):
         'nocheckcertificate': True,
         'ignoreerrors': True,
         'no_color': True,
+        'no_color': True,
         'socket_timeout': 10,
+        'force_ipv4': True,
     }
 
     try:

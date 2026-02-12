@@ -2,7 +2,7 @@ FROM python:3.9-slim
 
 # Install ffmpeg
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg ca-certificates curl dnsutils && \
     rm -rf /var/lib/apt/lists/*
 
 # Set up a new user named "user" with user ID 1000
