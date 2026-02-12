@@ -130,148 +130,137 @@ async def stream_video(url: str = Query(...), quality: str = Query(None), type: 
 async def health_check():
     return {"status": "ok", "service": "Sherov Backend"}
 
+@app.get("/api/cobalt-audio")
+async def cobalt_audio(url: str = Query(...)):
+    """Get audio-only download URL using Cobalt API."""
+    try:
+        cobalt_url = "https://api.cobalt.tools/"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "url": url,
+            "downloadMode": "audio",
+            "audioFormat": "mp3",
+            "audioBitrate": "320"
+        }
+        
+        response = requests.post(cobalt_url, json=payload, headers=headers, timeout=15)
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Cobalt API error: {response.status_code}")
+        
+        cobalt_data = response.json()
+        
+        if cobalt_data.get("status") == "error":
+            error_msg = cobalt_data.get("error", {}).get("code", "Unknown error")
+            raise HTTPException(status_code=400, detail=f"Cobalt error: {error_msg}")
+        
+        download_url = cobalt_data.get("url")
+        if not download_url:
+            raise HTTPException(status_code=400, detail="No download URL from Cobalt")
+        
+        # Redirect to the audio file
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=download_url)
+        
+    except Exception as e:
+        print(f"Error getting audio: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Audio extraction failed: {str(e)}")
+
 @app.post("/api/download")
 async def extract_video_info(video_request: VideoRequest, request: Request):
-    ydl_opts = {
-        'quiet': False, # Changed to False for debugging
-        'verbose': True, # Enable verbose logs
-        'no_warnings': False,
-        'format': 'best',
-        'nocheckcertificate': True,
-        'ignoreerrors': True,
-        'no_color': True,
-        'socket_timeout': 30,
-        'force_ipv4': True,
-    }
-
+    """Extract video info using Cobalt API to bypass bot detection."""
+    
     try:
-        print(f"Processing URL: {video_request.url}")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_request.url, download=False)
-            
-            if not info:
-                raise ValueError("Could not extract video info")
-
-            formats = []
-            seen_qualities = set() # Track by quality label (e.g. "1080p") to avoid duplicates
-
-            # Get base URL from the incoming request (e.g. https://my-app.onrender.com)
-            base_url = str(request.base_url).rstrip('/')
-
-            # Helper to format bytes
-            def format_size(bytes_val):
-                if not bytes_val:
-                    return None
-                for unit in ['B', 'KB', 'MB', 'GB']:
-                    if bytes_val < 1024.0:
-                        return f"{bytes_val:.1f} {unit}"
-                    bytes_val /= 1024.0
-                return f"{bytes_val:.1f} TB"
-
-            # Helper to calculate size from bitrate if missing
-            def get_size(f_info, duration_s):
-                size = f_info.get('filesize') or f_info.get('filesize_approx')
-                if size:
-                    return size
-                
-                # Fallback: Calculate from bitrate (tbr)
-                tbr = f_info.get('tbr')
-                if tbr and duration_s:
-                    # tbr is in kbit/s. duration in seconds.
-                    # size = (tbr * 1024 * duration) / 8 bytes
-                    return (tbr * 1024 * duration_s) / 8
-                return 0
-
-            duration_s = info.get('duration') or 0
-
-            # 1. Find best Audio
-            best_audio = None
-            raw_formats = info.get('formats', [])
-            for f in raw_formats:
-                if f.get('vcodec') == 'none' and f.get('acodec') != 'none':
-                    if not best_audio or f.get('tbr', 0) > best_audio.get('tbr', 0):
-                        best_audio = f
-            
-            audio_size = 0
-            if best_audio:
-                audio_size = get_size(best_audio, duration_s)
-                formats.append({
-                    "label": "Audio (Best)",
-                    "quality": "audio",
-                    "file_size": format_size(audio_size),
-                    "url": f"{base_url}/api/stream?url={video_request.url}&type=audio",
-                    "ext": "mp3"
-                })
-
-            # 2. Analyze available video heights from raw formats
-            # We want to offer 360p, 480p, 720p, 1080p, etc. if they exist in SOME form (video-only or merged)
-            available_heights = {} # Map height -> best format dict for that height
-            
-            for f in raw_formats:
-                h = f.get('height')
-                if not h: continue
-                
-                # Keep the format with the best bitrate/filesize for this height
-                current_best = available_heights.get(h)
-                f_size = get_size(f, duration_s)
-                c_size = get_size(current_best, duration_s) if current_best else 0
-                
-                if not current_best or f_size > c_size:
-                    available_heights[h] = f
-            
-            # Sort heights descending
-            sorted_heights = sorted(list(available_heights.keys()), reverse=True)
-
-            for h in sorted_heights:
-                if h < 360: continue # Skip qualities lower than 360p as requested
-
-                f = available_heights[h]
-                video_size = get_size(f, duration_s)
-                
-                # If video has no audio (vcodec!=none, acodec=none), add best_audio size to estimate
-                total_size = video_size
-                if f.get('acodec') == 'none':
-                     total_size += audio_size
-
-                label = f"{h}p"
-                quality_type = "sd"
-                if h >= 2160:
-                    quality_type = "4k"
-                    label += " 4K"
-                elif h >= 1440:
-                    quality_type = "2k"
-                    label += " 2K"
-                elif h >= 1080:
-                    quality_type = "hd"
-                    label += " Full HD"
-                elif h >= 720:
-                    quality_type = "hd"
-                    label += " HD"
-                else:
-                     label += " SD"
-
-                if label in seen_qualities:
-                    continue
-
-                # Use proxy stream for guaranteed quality + audio
-                formats.append({
-                    "label": label,
-                    "quality": quality_type,
-                    "file_size": format_size(total_size),
-                    "url": f"{base_url}/api/stream?url={video_request.url}&quality={h}&type=video",
-                    "ext": "mp4"
-                })
-                seen_qualities.add(label)
-
-            # Extract relevant info
-            video_data = {
-                "title": info.get('title'),
-                "thumbnail": info.get('thumbnail'),
-                "platform": info.get('extractor_key'),
-                "duration": info.get('duration_string'),
-                "formats": formats
+        print(f"Processing URL via Cobalt API: {video_request.url}")
+        
+        # Call Cobalt API
+        cobalt_url = "https://api.cobalt.tools/"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "url": video_request.url,
+            "videoQuality": "max",
+            "audioFormat": "mp3",
+            "filenameStyle": "basic"
+        }
+        
+        response = requests.post(cobalt_url, json=payload, headers=headers, timeout=15)
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Cobalt API error: {response.status_code}")
+        
+        cobalt_data = response.json()
+        print(f"Cobalt response: {cobalt_data}")
+        
+        # Check response status
+        status = cobalt_data.get("status")
+        
+        if status == "error":
+            error_msg = cobalt_data.get("error", {}).get("code", "Unknown error")
+            raise HTTPException(status_code=400, detail=f"Cobalt error: {error_msg}")
+        
+        if status not in ["tunnel", "redirect"]:
+            raise HTTPException(status_code=400, detail=f"Unexpected Cobalt status: {status}")
+        
+        # Get the download URL
+        download_url = cobalt_data.get("url")
+        if not download_url:
+            raise HTTPException(status_code=400, detail="No download URL from Cobalt")
+        
+        # Extract basic info (Cobalt doesn't provide all metadata, so we'll use defaults)
+        filename = cobalt_data.get("filename", "video.mp4")
+        
+        # Determine platform from URL
+        platform = "Unknown"
+        if "youtube.com" in video_request.url or "youtu.be" in video_request.url:
+            platform = "YouTube"
+        elif "instagram.com" in video_request.url:
+            platform = "Instagram"
+        elif "tiktok.com" in video_request.url:
+            platform = "TikTok"
+        elif "facebook.com" in video_request.url or "fb.watch" in video_request.url:
+            platform = "Facebook"
+        elif "twitter.com" in video_request.url or "x.com" in video_request.url:
+            platform = "Twitter"
+        
+        # Create response with single format (Cobalt provides best quality)
+        base_url = str(request.base_url).rstrip('/')
+        
+        formats = [
+            {
+                "label": "Best Quality",
+                "quality": "hd",
+                "file_size": None,  # Cobalt doesn't provide size info
+                "url": download_url,
+                "ext": "mp4"
+            },
+            {
+                "label": "Audio Only",
+                "quality": "audio",
+                "file_size": None,
+                "url": f"{base_url}/api/cobalt-audio?url={video_request.url}",
+                "ext": "mp3"
             }
-            return video_data
+        ]
+        
+        video_data = {
+            "title": filename.replace(".mp4", "").replace(".webm", ""),
+            "thumbnail": None,  # Cobalt doesn't provide thumbnails
+            "platform": platform,
+            "duration": None,  # Cobalt doesn't provide duration
+            "formats": formats
+        }
+        
+        return video_data
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Network error calling Cobalt API: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Network error: {str(e)}")
     except Exception as e:
         print(f"Error processing URL: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Extraction failed: {str(e)}")
