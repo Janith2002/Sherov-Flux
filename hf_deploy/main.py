@@ -16,6 +16,16 @@ except ImportError:
 
 app = FastAPI()
 
+@app.on_event("startup")
+async def startup_event():
+    print("--------------------------------------------------")
+    print("🚀 STARTUP: SHEROV BACKEND V3 (DoH Patch)")
+    print("✅ /api/debug endpoint should be available")
+    print("--------------------------------------------------")
+    import patch_dns
+    # Ensure patch is applied if not already (it's idempotent-ish)
+    patch_dns.patch()
+
 @app.get("/api/debug")
 async def debug_network():
     import socket
