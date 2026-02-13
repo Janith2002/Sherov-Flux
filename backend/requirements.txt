@@ -1,10 +1,10 @@
 # Core Framework
 fastapi>=0.104.0
-uvicorn>=0.24.0
+uvicorn[standard]>=0.24.0
 pydantic>=2.0.0
 
-# Video Extraction
-yt-dlp @ git+https://github.com/yt-dlp/yt-dlp.git@master
+# Video Extraction - Use stable version instead of git
+yt-dlp>=2024.1.0
 
 # HTTP Clients
 httpx>=0.25.0
@@ -14,3 +14,6 @@ requests>=2.31.0
 cachetools>=5.3.0
 certifi>=2023.0.0
 dnspython>=2.4.0
+
+# Additional dependencies for production
+python-multipart>=0.0.6
