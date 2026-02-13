@@ -1,222 +1,145 @@
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import yt_dlp
 import uvicorn
-import subprocess
-import shlex
+from extractors import VideoExtractorManager
+from cachetools import TTLCache
+import hashlib
 
-app = FastAPI()
+# Optional DNS patch for Hugging Face Spaces
+try:
+    import patch_dns
+    patch_dns.patch()
+except ImportError:
+    print("INFO: patch_dns not found, skipping DNS patch")
 
-# Configure CORS
-# Configure CORS
-origins = [
-    "*", # Allow all origins for production (Netlify/Vercel)
-]
+app = FastAPI(title="Sherov Flux Video Downloader", version="2.0")
 
+# Configure CORS - Allow all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Cache for video info (5 minute TTL, max 100 items)
+cache = TTLCache(maxsize=100, ttl=300)
+
+# Initialize extractor manager
+extractor_manager = VideoExtractorManager()
+
+
 class VideoRequest(BaseModel):
     url: str
 
-@app.get("/api/stream")
-async def stream_video(url: str = Query(...), quality: str = Query(None), type: str = Query("video")):
-    # Determine yt-dlp path relative to venv
-    import sys
-    import os
-    
-    # Use python -m yt_dlp to avoid path issues on Linux/Docker
-    # This works because yt-dlp is installed as a python package
-    
-    # Build yt-dlp command to stream to stdout
-    cmd = [sys.executable, "-m", "yt_dlp", url, "-o", "-", "--quiet", "--no-warnings"]
-    
-    if type == "audio":
-        cmd.extend(["-f", "bestaudio/best", "-x", "--audio-format", "mp3"])
-        filename = "audio.mp3"
-        media_type = "audio/mpeg"
-    else:
-        # Video
-        if quality:
-            cmd.extend(["-f", f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]"])
-        else:
-            cmd.extend(["-f", "bestvideo+bestaudio/best"])
-        
-        filename = f"video_{quality or 'best'}.mp4"
-        media_type = "video/mp4"
-
-    # streaming generator
-    def iterfile():
-        # Use subprocess to capture stdout
-        # Note: In production, consider using asyncio subprocess
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**8) as proc:
-            while True:
-                chunk = proc.stdout.read(4096)
-                if not chunk:
-                    break
-                yield chunk
-    
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"'
-    }
-    
-    
-    return StreamingResponse(iterfile(), media_type=media_type, headers=headers)
 
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "service": "Sherov Backend"}
-
-@app.post("/api/download")
-async def extract_video_info(video_request: VideoRequest, request: Request):
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'format': 'best',
-        'nocheckcertificate': True,
-        'ignoreerrors': True,
-        'no_color': True,
-        'socket_timeout': 10,
+    """Health check endpoint"""
+    return {
+        "status": "ok",
+        "service": "Sherov Flux Backend",
+        "version": "2.0",
+        "features": ["Cobalt API", "yt-dlp", "Auto-fallback"]
     }
 
+
+@app.get("/api/health")
+async def detailed_health():
+    """Detailed health check with service status"""
+    import httpx
+    
+    status = {
+        "backend": "operational",
+        "cobalt_api": "checking...",
+        "ytdlp": "operational"
+    }
+    
+    # Check Cobalt API
     try:
-        print(f"Processing URL: {video_request.url}")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_request.url, download=False)
-            
-            if not info:
-                raise ValueError("Could not extract video info")
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get("https://api.cobalt.tools/")
+            status["cobalt_api"] = "operational" if response.status_code == 200 else "degraded"
+    except:
+        status["cobalt_api"] = "unavailable"
+    
+    return status
 
-            formats = []
-            seen_qualities = set() # Track by quality label (e.g. "1080p") to avoid duplicates
 
-            # Get base URL from the incoming request (e.g. https://my-app.onrender.com)
-            base_url = str(request.base_url).rstrip('/')
-
-            # Helper to format bytes
-            def format_size(bytes_val):
-                if not bytes_val:
-                    return None
-                for unit in ['B', 'KB', 'MB', 'GB']:
-                    if bytes_val < 1024.0:
-                        return f"{bytes_val:.1f} {unit}"
-                    bytes_val /= 1024.0
-                return f"{bytes_val:.1f} TB"
-
-            # Helper to calculate size from bitrate if missing
-            def get_size(f_info, duration_s):
-                size = f_info.get('filesize') or f_info.get('filesize_approx')
-                if size:
-                    return size
-                
-                # Fallback: Calculate from bitrate (tbr)
-                tbr = f_info.get('tbr')
-                if tbr and duration_s:
-                    # tbr is in kbit/s. duration in seconds.
-                    # size = (tbr * 1024 * duration) / 8 bytes
-                    return (tbr * 1024 * duration_s) / 8
-                return 0
-
-            duration_s = info.get('duration') or 0
-
-            # 1. Find best Audio
-            best_audio = None
-            raw_formats = info.get('formats', [])
-            for f in raw_formats:
-                if f.get('vcodec') == 'none' and f.get('acodec') != 'none':
-                    if not best_audio or f.get('tbr', 0) > best_audio.get('tbr', 0):
-                        best_audio = f
-            
-            audio_size = 0
-            if best_audio:
-                audio_size = get_size(best_audio, duration_s)
-                formats.append({
-                    "label": "Audio (Best)",
-                    "quality": "audio",
-                    "file_size": format_size(audio_size),
-                    "url": f"{base_url}/api/stream?url={video_request.url}&type=audio",
-                    "ext": "mp3"
-                })
-
-            # 2. Analyze available video heights from raw formats
-            # We want to offer 360p, 480p, 720p, 1080p, etc. if they exist in SOME form (video-only or merged)
-            available_heights = {} # Map height -> best format dict for that height
-            
-            for f in raw_formats:
-                h = f.get('height')
-                if not h: continue
-                
-                # Keep the format with the best bitrate/filesize for this height
-                current_best = available_heights.get(h)
-                f_size = get_size(f, duration_s)
-                c_size = get_size(current_best, duration_s) if current_best else 0
-                
-                if not current_best or f_size > c_size:
-                    available_heights[h] = f
-            
-            # Sort heights descending
-            sorted_heights = sorted(list(available_heights.keys()), reverse=True)
-
-            for h in sorted_heights:
-                if h < 360: continue # Skip qualities lower than 360p as requested
-
-                f = available_heights[h]
-                video_size = get_size(f, duration_s)
-                
-                # If video has no audio (vcodec!=none, acodec=none), add best_audio size to estimate
-                total_size = video_size
-                if f.get('acodec') == 'none':
-                     total_size += audio_size
-
-                label = f"{h}p"
-                quality_type = "sd"
-                if h >= 2160:
-                    quality_type = "4k"
-                    label += " 4K"
-                elif h >= 1440:
-                    quality_type = "2k"
-                    label += " 2K"
-                elif h >= 1080:
-                    quality_type = "hd"
-                    label += " Full HD"
-                elif h >= 720:
-                    quality_type = "hd"
-                    label += " HD"
-                else:
-                     label += " SD"
-
-                if label in seen_qualities:
-                    continue
-
-                # Use proxy stream for guaranteed quality + audio
-                formats.append({
-                    "label": label,
-                    "quality": quality_type,
-                    "file_size": format_size(total_size),
-                    "url": f"{base_url}/api/stream?url={video_request.url}&quality={h}&type=video",
-                    "ext": "mp4"
-                })
-                seen_qualities.add(label)
-
-            # Extract relevant info
-            video_data = {
-                "title": info.get('title'),
-                "thumbnail": info.get('thumbnail'),
-                "platform": info.get('extractor_key'),
-                "duration": info.get('duration_string'),
-                "formats": formats
-            }
-            return video_data
+@app.post("/api/download")
+async def extract_video_info(video_request: VideoRequest):
+    """
+    Extract video information from URL
+    
+    Supports: YouTube, TikTok, Instagram, Facebook, Twitter, Reddit
+    Uses: Cobalt API (primary for social media) + yt-dlp (fallback)
+    """
+    
+    url = video_request.url.strip()
+    
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+    
+    # Validate URL format
+    if not url.startswith(('http://', 'https://')):
+        raise HTTPException(status_code=400, detail="Invalid URL format")
+    
+    # Check cache
+    cache_key = hashlib.md5(url.encode()).hexdigest()
+    if cache_key in cache:
+        print(f"✓ Cache hit for {url}")
+        return cache[cache_key]
+    
+    try:
+        print(f"\n{'='*60}")
+        print(f"Processing URL: {url}")
+        print(f"{'='*60}")
+        
+        # Extract using multi-strategy manager
+        video_data = await extractor_manager.extract(url)
+        
+        # Validate response
+        if not video_data or not video_data.get('formats'):
+            raise HTTPException(
+                status_code=400, 
+                detail="No downloadable formats found. The video might be private or unavailable."
+            )
+        
+        # Cache the result
+        cache[cache_key] = video_data
+        
+        print(f"✓ Successfully extracted {len(video_data['formats'])} formats")
+        return video_data
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error processing URL: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Extraction failed: {str(e)}")
+        error_msg = str(e)
+        print(f"✗ Extraction failed: {error_msg}")
+        
+        # User-friendly error messages
+        if "private" in error_msg.lower():
+            detail = "This video is private and cannot be downloaded"
+        elif "unavailable" in error_msg.lower():
+            detail = "This video is unavailable or has been deleted"
+        elif "age" in error_msg.lower():
+            detail = "Age-restricted videos are not supported"
+        elif "All extraction methods failed" in error_msg:
+            detail = "Unable to download from this platform. Please try a different URL."
+        else:
+            detail = f"Failed to extract video: {error_msg}"
+        
+        raise HTTPException(status_code=400, detail=detail)
+
+
+@app.get("/api/clear-cache")
+async def clear_cache():
+    """Clear the video info cache (admin endpoint)"""
+    cache.clear()
+    return {"status": "ok", "message": "Cache cleared"}
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
